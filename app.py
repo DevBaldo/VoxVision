@@ -1,6 +1,7 @@
 # app.py
 import streamlit as st
 from io import BytesIO
+import time # Importa el módulo time
 from gtts import gTTS
 import tempfile
 import pdfplumber
@@ -49,12 +50,16 @@ def extraer_imagenes(file_bytes):
             })
     return imagenes
 
-# Describir imagen API
+# Describir imagen API (versión corregida)
 def describir_imagen_api(image_bytes, api_key):
     try:
-        # Intenta procesar la imagen con Pillow
         img = Image.open(BytesIO(image_bytes))
 
+        # Redimensionar la imagen para evitar errores de tamaño
+        max_size = (1024, 1024)
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        
+        # Convertir a un formato estándar
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
@@ -62,26 +67,66 @@ def describir_imagen_api(image_bytes, api_key):
         img.save(output_buffer, format="JPEG")
         processed_image_bytes = output_buffer.getvalue()
 
-        # Si el procesamiento es exitoso, procede con la API
-        b64 = base64.b64encode(processed_image_bytes).decode()
+        # Codificar la imagen en Base64
+        b64 = base64.b64encode(processed_image_bytes).decode('utf-8')
+        
+        # **PASO CLAVE:** Asegurarse de que no haya prefijos no deseados
+        if b64.startswith("data:image/jpeg;base64,"):
+            b64 = b64.replace("data:image/jpeg;base64,", "", 1)
+        
+        # Estructura del payload corregida según el ejemplo de curl
         payload = {
             "modelVersion": "v1",
-            "imagesBase64": [{"filename":"img.jpg", "base64": b64}],
+            "imagesBase64": [
+                {
+                    "filename": "img.jpg",
+                    "base64": b64
+                }
+            ],
             "options": {
-                # ... (resto de tus opciones)
+                "enforcedKeywords": [],
+                "excludedKeywords": [],
+                "maxKeywords": 10,
+                "excludeMultiWordKeywords": False,
+                "maxTitleCharacterLength": 40,
+                "maxDescriptionCharacterLength": 200,
+                "titleCasing": "sentence case",
+                "descriptionStyle": "default"
             }
         }
         
+        # PASO 1: Usar POST para enviar la imagen y obtener el jobId
         res = requests.post("https://aikeywording.com/api/customer-api/keyword",
                             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
                             json=payload)
         res.raise_for_status()
         data = res.json()
-        return data.get("description", "")
+        
+        job_id = data.get("jobId")
+        if not job_id:
+            st.error("No se pudo obtener el ID del trabajo de la API.")
+            return ""
+
+        # PASO 2: Usar GET en un bucle (polling) para obtener la descripción
+        with st.spinner(f"Generando descripción para la imagen... (Job ID: {job_id})"):
+            max_retries = 10
+            for i in range(max_retries):
+                time.sleep(2)
+                get_url = f"https://aikeywording.com/api/customer-api/keyword/{job_id}"
+                get_res = requests.get(get_url, headers={"X-API-KEY": api_key})
+                
+                if get_res.status_code == 200:
+                    get_data = get_res.json()
+                    description = get_data.get("description", "")
+                    if description:
+                        return description
+                
+                st.info(f"Intento {i + 1}/{max_retries}: Esperando la descripción...")
+
+        st.warning("No se pudo obtener la descripción de la imagen después de varios intentos.")
+        return ""
 
     except Exception as e:
-        # Si algo falla (Pillow no puede abrirlo o la API da un error),
-        # imprime una advertencia y retorna una cadena vacía.
         st.warning(f"Se omitió una imagen debido a un formato no válido o un error de API: {e}")
         return ""
 
@@ -105,7 +150,8 @@ if uploaded:
         
         imagenes = extraer_imagenes(uploaded_bytes)
         for img in imagenes:
-            desc = describir_imagen_api(img["bytes"], AIK_API_KEY)
+            with st.spinner(f"Analizando imagen en la página {img['page']}..."):
+                desc = describir_imagen_api(img["bytes"], AIK_API_KEY)
             
             if desc: 
                 descripciones.append((img["page"], desc))
