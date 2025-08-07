@@ -51,7 +51,7 @@ def extraer_imagenes(file_bytes):
 
 def describir_imagen_api(image_bytes, api_key):
     try:
-        # Step 1: Pre-process the image
+        # Paso 1: Pre-procesar la imagen para el upload
         img = Image.open(BytesIO(image_bytes))
         max_size = (1024, 1024)
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
@@ -62,33 +62,36 @@ def describir_imagen_api(image_bytes, api_key):
         img.save(output_buffer, format="JPEG")
         processed_image_bytes = output_buffer.getvalue()
 
-        # Step 2: Request a signed URL from the API
+        # Paso 2: Obtener la URL firmada (signed URL) para la subida
         signed_url_payload = {
-            "filename": "img.jpg"
+            "numberOfImagesToUpload": 1,
+            "fileExtension": "jpg"
         }
         res_signed_url = requests.post(
-            "https://aikeywording.com/api/customer-api/signed-url", # <<< Replace with the correct endpoint
+            "https://aikeywording.com/api/customer-api/image/upload",
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
             json=signed_url_payload
         )
         res_signed_url.raise_for_status()
         signed_url_data = res_signed_url.json()
-        signed_url = signed_url_data.get("signedUrl")
-        public_url = signed_url_data.get("publicUrl")
-
-        if not signed_url or not public_url:
+        
+        if not signed_url_data.get("uploadUrls"):
             st.error("Error: No se pudo obtener la URL firmada de la API.")
             return ""
 
-        # Step 3: Upload the image to the signed URL using a PUT request
+        upload_info = signed_url_data["uploadUrls"][0]
+        signed_url = upload_info["signedUploadUrl"]
+        public_url = upload_info["destinationUrl"]
+
+        # Paso 3: Subir la imagen a la URL firmada usando un request PUT
         headers = {'Content-Type': 'image/jpeg'}
         upload_response = requests.put(signed_url, data=processed_image_bytes, headers=headers)
         upload_response.raise_for_status()
 
-        # Step 4: Submit the job with the public URL
+        # Paso 4: Crear el trabajo de keywording con la URL pública
         payload = {
             "modelVersion": "v1",
-            "imagesUrls": [public_url],
+            "imagesUrl": [{"filename": "img.jpg", "url": public_url}],
             "options": {
                 "enforcedKeywords": [],
                 "excludedKeywords": [],
@@ -113,7 +116,7 @@ def describir_imagen_api(image_bytes, api_key):
             st.error("Error: No se pudo obtener el ID del trabajo.")
             return ""
 
-        # Step 5: Poll for results
+        # Paso 5: Polling para obtener los resultados
         with st.spinner(f"Generando descripción para la imagen... (Job ID: {job_id})"):
             max_retries = 10
             for i in range(max_retries):
@@ -158,17 +161,18 @@ if uploaded:
                 text += page.extract_text() or ""
         
         imagenes = extraer_imagenes(uploaded_bytes)
-        with st.spinner("Analizando imágenes del PDF..."):
-            for img in imagenes:
-                desc = describir_imagen_api(img["bytes"], AIK_API_KEY)
-                
-                if desc:
-                    descripciones.append((img["page"], desc))
-                    st.image(img["bytes"], caption=f"Imagen página {img['page']}", use_column_width=True)
-                    st.write(f"📝 Descripción para no videntes: {desc}")
-                else:
-                    st.warning(f"Se omitió una imagen en la página {img['page']} debido a un error.")
-
+        if imagenes:
+            with st.spinner("Analizando imágenes del PDF..."):
+                for img in imagenes:
+                    desc = describir_imagen_api(img["bytes"], AIK_API_KEY)
+                    
+                    if desc:
+                        descripciones.append((img["page"], desc))
+                        st.image(img["bytes"], caption=f"Imagen página {img['page']}", use_column_width=True)
+                        st.write(f"📝 Descripción para no videntes: {desc}")
+                    else:
+                        st.warning(f"Se omitió una imagen en la página {img['page']} debido a un error.")
+    
     st.text_area("📝 Texto extraído", value=text, height=300)
 
     texto_completo = text + "\n\n" + "\n\n".join(
