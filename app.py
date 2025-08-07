@@ -49,23 +49,35 @@ def extraer_imagenes(file_bytes):
             })
     return imagenes
 
-def describir_imagen_api(image_bytes, api_key):
+def describir_imagen_api(image_bytes, api_key, file_ext):
     try:
-        # Paso 1: Pre-procesar la imagen para el upload
+        # Step 1: Pre-process the image
         img = Image.open(BytesIO(image_bytes))
         max_size = (1024, 1024)
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
         
+        # Guardar en un buffer para la subida
         output_buffer = BytesIO()
-        img.save(output_buffer, format="JPEG")
+        
+        # Determinar el tipo de contenido y la extensión de forma dinámica
+        if file_ext.lower() in ['jpeg', 'jpg']:
+            content_type = 'image/jpeg'
+            img.save(output_buffer, format="JPEG")
+        elif file_ext.lower() == 'png':
+            content_type = 'image/png'
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.save(output_buffer, format="PNG")
+        else:
+            st.warning(f"Formato de imagen {file_ext} no soportado.")
+            return ""
+
         processed_image_bytes = output_buffer.getvalue()
 
-        # Paso 2: Obtener la URL firmada (signed URL) para la subida
+        # Step 2: Request a signed URL from the API using the correct endpoint
         signed_url_payload = {
             "numberOfImagesToUpload": 1,
-            "fileExtension": "jpg"
+            "fileExtension": file_ext
         }
         res_signed_url = requests.post(
             "https://aikeywording.com/api/customer-api/image/upload",
@@ -83,15 +95,22 @@ def describir_imagen_api(image_bytes, api_key):
         signed_url = upload_info["signedUploadUrl"]
         public_url = upload_info["destinationUrl"]
 
-        # Paso 3: Subir la imagen a la URL firmada usando un request PUT
-        headers = {'Content-Type': 'image/jpeg'}
+        # Step 3: Upload the image to the signed URL using a PUT request
+        headers = {'Content-Type': content_type}
+        # **Nueva corrección:** Se usa la URL firmada tal cual, ya que es la que tiene los permisos de subida.
         upload_response = requests.put(signed_url, data=processed_image_bytes, headers=headers)
         upload_response.raise_for_status()
 
-        # Paso 4: Crear el trabajo de keywording con la URL pública
+        # Step 4: Submit the job with the public URL
+        # **Nueva corrección:** El payload se ajusta para usar el formato correcto.
         payload = {
             "modelVersion": "v1",
-            "imagesUrl": [{"filename": "img.jpg", "url": public_url}],
+            "imagesUrl": [
+                {
+                    "filename": f"img.{file_ext}",
+                    "url": public_url
+                }
+            ],
             "options": {
                 "enforcedKeywords": [],
                 "excludedKeywords": [],
@@ -116,7 +135,7 @@ def describir_imagen_api(image_bytes, api_key):
             st.error("Error: No se pudo obtener el ID del trabajo.")
             return ""
 
-        # Paso 5: Polling para obtener los resultados
+        # Step 5: Poll for results
         with st.spinner(f"Generando descripción para la imagen... (Job ID: {job_id})"):
             max_retries = 10
             for i in range(max_retries):
@@ -164,7 +183,8 @@ if uploaded:
         if imagenes:
             with st.spinner("Analizando imágenes del PDF..."):
                 for img in imagenes:
-                    desc = describir_imagen_api(img["bytes"], AIK_API_KEY)
+                    # Se pasa la extensión a la función
+                    desc = describir_imagen_api(img["bytes"], AIK_API_KEY, img["ext"])
                     
                     if desc:
                         descripciones.append((img["page"], desc))
