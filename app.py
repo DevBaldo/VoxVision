@@ -1,9 +1,8 @@
 # app.py
 import streamlit as st
 from io import BytesIO
-import time # Importa el módulo time
+import time
 from gtts import gTTS
-import tempfile
 import pdfplumber
 from groq import Groq
 import os
@@ -17,7 +16,7 @@ GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 AIK_API_KEY = st.secrets.get("AIKEYWORDING_API_KEY") or os.getenv("AIKEYWORDING_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
-# Detectar idioma automaticamiente API
+# Detectar idioma automáticament API
 def detectar_idioma(texto: str) -> str:
     prompt = f"""
 Detecta el idioma de este texto y responde solo con el código ISO 639-1 (ej. 'en', 'es', 'fr', etc).
@@ -34,7 +33,7 @@ Texto: \"{texto.strip()[:500]}\"
     idioma = response.choices[0].message.content.strip().lower()
     return idioma
 
-# Detectar imagenes
+# Detectar imágenes
 def extraer_imagenes(file_bytes):
     pdf = fitz.open(stream=file_bytes, filetype="pdf")
     imagenes = []
@@ -44,22 +43,18 @@ def extraer_imagenes(file_bytes):
             xref = img[0]
             base = pdf.extract_image(xref)
             imagenes.append({
-                "page": p+1,
+                "page": p + 1,
                 "bytes": base["image"],
                 "ext": base["ext"]
             })
     return imagenes
 
-# Describir imagen API (versión corregida)
 def describir_imagen_api(image_bytes, api_key):
     try:
+        # Step 1: Pre-process the image
         img = Image.open(BytesIO(image_bytes))
-
-        # Redimensionar la imagen para evitar errores de tamaño
         max_size = (1024, 1024)
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
-        
-        # Convertir a un formato estándar
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
@@ -67,22 +62,33 @@ def describir_imagen_api(image_bytes, api_key):
         img.save(output_buffer, format="JPEG")
         processed_image_bytes = output_buffer.getvalue()
 
-        # Codificar la imagen en Base64
-        b64 = base64.b64encode(processed_image_bytes).decode('utf-8')
-        
-        # **PASO CLAVE:** Asegurarse de que no haya prefijos no deseados
-        if b64.startswith("data:image/jpeg;base64,"):
-            b64 = b64.replace("data:image/jpeg;base64,", "", 1)
-        
-        # Estructura del payload corregida según el ejemplo de curl
+        # Step 2: Request a signed URL from the API
+        signed_url_payload = {
+            "filename": "img.jpg"
+        }
+        res_signed_url = requests.post(
+            "https://aikeywording.com/api/customer-api/signed-url", # <<< Replace with the correct endpoint
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+            json=signed_url_payload
+        )
+        res_signed_url.raise_for_status()
+        signed_url_data = res_signed_url.json()
+        signed_url = signed_url_data.get("signedUrl")
+        public_url = signed_url_data.get("publicUrl")
+
+        if not signed_url or not public_url:
+            st.error("Error: No se pudo obtener la URL firmada de la API.")
+            return ""
+
+        # Step 3: Upload the image to the signed URL using a PUT request
+        headers = {'Content-Type': 'image/jpeg'}
+        upload_response = requests.put(signed_url, data=processed_image_bytes, headers=headers)
+        upload_response.raise_for_status()
+
+        # Step 4: Submit the job with the public URL
         payload = {
             "modelVersion": "v1",
-            "imagesBase64": [
-                {
-                    "filename": "img.jpg",
-                    "base64": b64
-                }
-            ],
+            "imagesUrls": [public_url],
             "options": {
                 "enforcedKeywords": [],
                 "excludedKeywords": [],
@@ -94,20 +100,20 @@ def describir_imagen_api(image_bytes, api_key):
                 "descriptionStyle": "default"
             }
         }
-        
-        # PASO 1: Usar POST para enviar la imagen y obtener el jobId
-        res = requests.post("https://aikeywording.com/api/customer-api/keyword",
-                            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-                            json=payload)
-        res.raise_for_status()
-        data = res.json()
-        
+        res_job = requests.post(
+            "https://aikeywording.com/api/customer-api/keyword",
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+            json=payload
+        )
+        res_job.raise_for_status()
+        data = res_job.json()
         job_id = data.get("jobId")
+
         if not job_id:
-            st.error("No se pudo obtener el ID del trabajo de la API.")
+            st.error("Error: No se pudo obtener el ID del trabajo.")
             return ""
 
-        # PASO 2: Usar GET en un bucle (polling) para obtener la descripción
+        # Step 5: Poll for results
         with st.spinner(f"Generando descripción para la imagen... (Job ID: {job_id})"):
             max_retries = 10
             for i in range(max_retries):
@@ -126,8 +132,11 @@ def describir_imagen_api(image_bytes, api_key):
         st.warning("No se pudo obtener la descripción de la imagen después de varios intentos.")
         return ""
 
+    except requests.exceptions.HTTPError as http_err:
+        st.warning(f"Error de API: {http_err} - Comprueba tu clave de API y el formato de la imagen.")
+        return ""
     except Exception as e:
-        st.warning(f"Se omitió una imagen debido a un formato no válido o un error de API: {e}")
+        st.warning(f"Se omitió una imagen debido a un error: {e}")
         return ""
 
 # Interfaz
@@ -143,22 +152,22 @@ if uploaded:
     
     if uploaded.type == "text/plain":
         text = uploaded_bytes.decode("utf-8")
-    else: # This is a PDF file
+    else:
         with pdfplumber.open(BytesIO(uploaded_bytes)) as pdf:
             for page in pdf.pages:
                 text += page.extract_text() or ""
         
         imagenes = extraer_imagenes(uploaded_bytes)
-        for img in imagenes:
-            with st.spinner(f"Analizando imagen en la página {img['page']}..."):
+        with st.spinner("Analizando imágenes del PDF..."):
+            for img in imagenes:
                 desc = describir_imagen_api(img["bytes"], AIK_API_KEY)
-            
-            if desc: 
-                descripciones.append((img["page"], desc))
-                st.image(img["bytes"], caption=f"Imagen página {img['page']}", use_column_width=True)
-                st.write(f"📝 Descripción para no videntes: {desc}")
-            else:
-                st.warning(f"Se omitió una imagen en la página {img['page']} debido a un error.")
+                
+                if desc:
+                    descripciones.append((img["page"], desc))
+                    st.image(img["bytes"], caption=f"Imagen página {img['page']}", use_column_width=True)
+                    st.write(f"📝 Descripción para no videntes: {desc}")
+                else:
+                    st.warning(f"Se omitió una imagen en la página {img['page']} debido a un error.")
 
     st.text_area("📝 Texto extraído", value=text, height=300)
 
