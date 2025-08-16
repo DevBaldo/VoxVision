@@ -10,23 +10,34 @@ import fitz
 from PIL import Image
 import pytesseract
 from google import genai
+import tempfile
 
-# ---------------- CONFIGURACIÓN ---------------- #
 
-# Configuración de Tesseract (ajusta la ruta según tu SO)
+
+# ---------------- CONFIGURACION ---------------- #
+# -------------------------------
+#Tesseract
+#(Esto se usa en caso de que gemini este saturado o se terminen los creditos)
+# -------------------------------
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
+# -------------------------------
 # API keys
+# -------------------------------
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 
+# -------------------------------
+# Clientes
+# -------------------------------
 groq_client = Groq(api_key=GROQ_API_KEY)
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ---------------- FUNCIONES ---------------- #
 
+
+# ---------------- FUNCIONES ---------------- #
 # -------------------------------
-# Función: Detectar idioma con Groq
+# Funcion: Detectar idioma con Groq
 # -------------------------------
 def detectar_idioma(texto: str) -> str:
     prompt = f"""
@@ -44,7 +55,9 @@ def detectar_idioma(texto: str) -> str:
     idioma = response.choices[0].message.content.strip().lower()
     return idioma
 
-# Extraer texto de PDF
+# -------------------------------
+# Funcion: Extraer texto del PDF
+# -------------------------------
 def extraer_texto_pdf(file_bytes):
     texto = ""
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
@@ -75,21 +88,18 @@ def extraer_imagenes(file_bytes):
 # -------------------------------
 def describir_imagen(image_bytes, file_ext):
     try:
-        # Guardar imagen temporal
-        with open(f"temp.{file_ext}", "wb") as f:
-            f.write(image_bytes)
+        with tempfile.NamedTemporaryFile(suffix=f".{file_ext}", delete=False) as temp_file:
+            temp_file.write(image_bytes)
+            temp_path = temp_file.name
 
-        # Subir a Gemini Files API
-        file_ref = genai_client.files.upload(file=f"temp.{file_ext}")
+        file_ref = genai_client.files.upload(file=temp_path)
 
-        # Solicitar descripción a Gemini
         response = genai_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[file_ref, "Con la menor cantidad de caracteres posibles, describe esta imagen de forma accesible. El texto sera leido por gTTs, hazlo compatible"]
         )
-
         return response.text.strip()
-
+    
     except Exception as e:
         st.warning(f"⚠️ Gemini falló, usando OCR Tesseract. Error: {e}")
         try:
@@ -99,8 +109,10 @@ def describir_imagen(image_bytes, file_ext):
         except Exception as e2:
             st.error(f"Error también en Tesseract: {e2}")
             return ""
-
-# Convertir texto a voz
+        
+# -------------------------------
+# Funcion: Convertir texto a voz
+# -------------------------------
 def texto_a_voz(texto, idioma):
     tts = gTTS(text=texto, lang=idioma)
     temp = BytesIO()
@@ -108,64 +120,89 @@ def texto_a_voz(texto, idioma):
     temp.seek(0)
     return temp
 
+
+# ---------------- Interfaz ---------------- #
 # -------------------------------
-# Interfaz Streamlit
+# Subida de archivo
 # -------------------------------
 st.set_page_config(page_title="VoxVision")
-st.title("🧠 VoxVision: PDF o Texto ➜ Voz Accesible")
-
-# Subida de archivo
-uploaded = st.file_uploader("📄 Sube tu archivo PDF o TXT", type=["pdf", "txt"])
+st.title("📖 VoxVision – PDF/TXT/Imagen a Audio")
+uploaded = st.file_uploader("📄 Sube tu archivo PDF, TXT o imagen", type=["pdf", "txt", "png", "jpg", "jpeg"])
 
 if uploaded:
     uploaded_bytes = uploaded.getvalue()
     text = ""
     descripciones = []
 
-    # Caso TXT
+    # -------------------------------
+    # Manejar Tipos de archivos
+    # -------------------------------
     if uploaded.type == "text/plain":
         text = uploaded_bytes.decode("utf-8")
+        st.text_area("📝 Texto extraído", value=text, height=300)
 
-    # Caso PDF
-    else:
-        with pdfplumber.open(BytesIO(uploaded_bytes)) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-
-        # Extraer imágenes
+    elif uploaded.type == "application/pdf":
+        text = extraer_texto_pdf(uploaded_bytes)
+        
+        # -------------------------------
+        # Extraer imágenes del PDF y describirlas
+        # -------------------------------
         imagenes = extraer_imagenes(uploaded_bytes)
         if imagenes:
             with st.spinner("🔎 Analizando imágenes del PDF..."):
                 for i, img in enumerate(imagenes):
                     desc = describir_imagen(img["bytes"], img["ext"])
                     if desc:
-                        # Almacenamos la imagen y la descripción juntas
                         descripciones.append((img, desc))
                     else:
                         st.warning(f"⚠️ No se pudo describir la imagen en la página {img['page']}")
 
-        # Mostrar las imágenes y descripciones con un expander si hay más de una
-        if descripciones:
-            if len(descripciones) > 1:
-                with st.expander("🖼️ Ver descripciones e imágenes"):
-                    # Iteramos sobre la lista que contiene la imagen y la descripción
-                    for img_data, desc in descripciones:
-                        st.image(img_data["bytes"], caption=f"📷 Imagen página {img_data['page']}", use_container_width=True)
-                        st.write(f"📝 Descripción accesible: {desc}")
-            else:
-                img_data, desc = descripciones[0]
-                st.image(img_data["bytes"], caption=f"📷 Imagen página {img_data['page']}", use_container_width=True)
+            # -------------------------------
+            # Mostrar imágenes y descripciones
+            # -------------------------------
+            if descripciones:
+                if len(descripciones) > 1:
+                    with st.expander("🖼️ Ver descripciones e imágenes"):
+                        for img_data, desc in descripciones:
+                            st.image(img_data["bytes"], caption=f"📷 Imagen página {img_data['page']}", use_container_width=True)
+                            st.write(f"📝 Descripción accesible: {desc}")
+                else:
+                    img_data, desc = descripciones[0]
+                    st.image(img_data["bytes"], caption=f"📷 Imagen página {img_data['page']}", use_container_width=True)
+                    st.write(f"📝 Descripción accesible: {desc}")
+
+        # -------------------------------
+        # Unir texto y descripciones
+        # -------------------------------
+        texto_completo = text + "\n\n" + "\n\n".join(
+            f"Descripción imagen página {d[0]['page']}: {d[1]}" for d in descripciones
+        )
+        st.text_area("📝 Texto extraído", value=texto_completo, height=300)
+
+    elif uploaded.type.startswith("image/"):
+        image_bytes = uploaded.read()
+        image_ext = uploaded.type.split("/")[-1]
+        
+        st.image(image_bytes, caption="🖼️ Imagen subida", use_container_width=True)
+        
+        with st.spinner("🔎 Analizando imagen..."):
+            desc = describir_imagen(image_bytes, image_ext)
+            if desc:
+                text = desc
                 st.write(f"📝 Descripción accesible: {desc}")
-
-    # Texto final con descripciones
-    texto_completo = text + "\n\n" + "\n\n".join(
-    f"Descripción imagen página {d[0]['page']}: {d[1]}" for d in descripciones
-)
-
-    # Mostrar texto extraído
-    st.text_area("📝 Texto extraído", value=texto_completo, height=300)
-
-    # Convertir a voz
+            else:
+                st.warning("⚠️ No se pudo describir la imagen.")
+        
+        # -------------------------------
+        # El texto a convertir es la descripcion (Solo para imagenes)
+        # -------------------------------
+        texto_completo = text
+        st.text_area("📝 Texto extraído", value=texto_completo, height=300)
+    
+    # -------------------------------
+    # Conversion a Voz
+    # (todos los tipos de archivo)
+    # -------------------------------
     if st.button("🗣️ Convertir a voz"):
         if not texto_completo.strip():
             st.warning("⚠️ No hay texto para convertir.")
@@ -186,7 +223,10 @@ if uploaded:
                 st.session_state.audio_bytes = audio_bytes
                 st.session_state.lang = lang
 
-    # Mostrar audio
+    # -------------------------------
+    # Opcion de descarga de audio
+    # (todos los tipos de archivo)
+    # -------------------------------
     if "audio_bytes" in st.session_state and st.session_state.audio_bytes:
         st.audio(st.session_state.audio_bytes, format="audio/mp3")
         st.download_button(
